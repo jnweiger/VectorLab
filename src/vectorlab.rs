@@ -7,29 +7,27 @@ use winit::{
     window::{WindowBuilder},
 };
 use femtovg::{renderer::OpenGl, Canvas, Color, Path, Paint, Transform2D};
+use glutin::{ContextBuilder, event::{Event, WindowEvent}, event_loop::ControlFlow};
 use rfd::FileDialog;
+
 
 fn main() {
     // Accept initial SVG file if provided
     let svg_file = env::args().nth(1).map(|s| PathBuf::from(s));
     let mut current_svg = svg_file;
 
-
-    // Set up winit window
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("FemtoSVG Viewer")
-        .with_inner_size(LogicalSize::new(1200, 800))
-        .build(&event_loop)
+    let event_loop = glutin::event_loop::EventLoop::new();
+    let window_builder = glutin::window::WindowBuilder::new()
+        .with_title("VectorLab")
+        .with_inner_size(glutin::dpi::LogicalSize::new(1200.0, 800.0));
+    let windowed_context = ContextBuilder::new()
+        .build_windowed(window_builder, &event_loop)
         .unwrap();
-
-    // Setup OpenGL context and femtovg canvas
-    let glow_context = unsafe {
-        // Use a crates like glutin, glow, etc., to create the OpenGL context for femtovg
-        // Placeholder: you need a real GL context here
-        OpenGl::new_from_function_c_loader(|_| std::ptr::null())
-    };
-    let mut canvas = Canvas::new(glow_context).unwrap();
+    let windowed_context = unsafe { windowed_context.make_current().unwrap() };
+    let gl = unsafe { glow::Context::from_loader_function(|s| windowed_context.get_proc_address(s)) };
+    let renderer = OpenGl::new(gl).unwrap();
+    let mut canvas = Canvas::new(renderer).unwrap();
+    canvas.set_size(800, 600, 1.0);
 
     // Load and parse SVG file into femtovg paths and paints
     let svg_drawables = load_svg_as_paths_and_paints(&svg_file);
@@ -39,10 +37,10 @@ fn main() {
     // TODO: maintain a stack or matrix for pan/zoom state
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = ControlFlow::Poll;
+
         match event {
             Event::RedrawRequested(_) => {
-                // Drawing
                 canvas.clear_rect(0, 0, 1200, 800, Color::rgbf(1.0, 1.0, 1.0));
                 canvas.save();
                 canvas.transform(transform);
@@ -55,8 +53,8 @@ fn main() {
                 // Draw UI: menu, zoom buttons (+, -, 100%), right pane checkboxes
                 draw_ui_overlays(&mut canvas);
 
-                // Swap buffers (specific to platform/context used)
-                // window.swap_buffers();
+                canvas.flush();
+                windowed_context.swap_buffers().unwrap();
             }
             Event::WindowEvent { event, .. } => match event {
                 /* ... mouse + keyboard ... */
@@ -85,12 +83,15 @@ fn main() {
                     // Apply zoom logic
                 }
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                _ => (),
-            },
+            }
+            Event::MainEventsCleared => {
+                windowed_context.window().request_redraw();
+            }
             _ => (),
         }
     });
 }
+
 
 fn load_svg_as_paths_and_paints(svg_file: &PathBuf) -> Vec<(Path, Paint)> {
     // Use resvg, usvg, or similar, or a custom parser
@@ -103,3 +104,4 @@ fn draw_ui_overlays(canvas: &mut Canvas<OpenGl>) {
     // Draw zoom control (+/-/100% buttons)
     // Draw right pane checkboxes (future: add interactivity)
 }
+

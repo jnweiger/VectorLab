@@ -1,0 +1,24 @@
+#
+# requires:
+#  apt install rustc
+#  apt apt install libgtk-3-dev			# Fix for: The system library gdk-3.0 required by crate gdk-sys was not found.
+
+[package]
+name = "vectorlab"
+version = "0.0.1"
+edition = "2024"		# cargo edition, not my vectorlab edition
+default-run = "vectorlab"	# makes '--bin vectorlab' default for cargo run
+
+[[bin]]
+name = "vectorlab"
+path = "src/vectorlab.rs"	# implements:	cargo run --bin vectorlab
+
+
+[dependencies]
+# femtovg = { path = "../../femtovg/femtovg" }	# from local github checkout
+# femtovg = { git = "https://github.com/femtovg/femtovg.git", branch = "main" }
+femtovg = "0.14.0"				# from crates.io
+glutin = "0.32.3"
+rfd = "0.10"  # add any other crates you need (example: rfd for file dialogs)
+winit = "0.28"  # for window management and event loop
+
