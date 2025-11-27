@@ -9,8 +9,12 @@
  * - cargo add resvg			# resvg is the rendering library that takes the usvg::Tree and rasterizes it
  * - cargo add usvg			# usvg usvg is the SVG parsing and tree management library
  * - cargo add raw_window_handle
+ *
+ * References:
+ * - https://docs.rs/winit/0.29.12/winit/event/struct.KeyEvent.html
+ *
  */
-use glutin::config::{ConfigSurfaceTypes, ConfigTemplateBuilder};
+use glutin::config::{ConfigTemplate};
 use glutin::context::{ContextApi, ContextAttributesBuilder};
 use glutin::display::{DisplayApiPreference};
 use glutin::prelude::*;
@@ -20,6 +24,10 @@ use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent, ElementState, MouseButton, MouseScrollDelta};
 use winit::event_loop::{EventLoop, ControlFlow};
 use winit::window::WindowBuilder;
+use winit::keyboard::Key;
+use winit::event::Modifiers;
+
+
 
 // This resolves the E0599 error because raw_display_handle() is provided by the
 // trait, which must be explicitly imported for the method to be visible on
@@ -60,16 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).unwrap()
     };
 
-    let config_template = ConfigTemplateBuilder::new()
-        .with_alpha_size(8)
-        .with_surface_type(ConfigSurfaceTypes::WINDOW)
-        .build();
-
-    let config = gl_display
-        .find_configs(config_template)
-        .unwrap()
-        .next()		// find_configs() returns an iterator over matching Configs, .next() gets the first (and typically only/best) one
-        .unwrap();
+    let config_template = ConfigTemplate::default();
+    let mut configs = unsafe { gl_display.find_configs(config_template)? };
+    let config = configs.next().unwrap_or_else(|| panic!("no config found"));	// next() requires a mutable.
 
     let context_attributes = ContextAttributesBuilder::new()
         .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(3, 3))))
@@ -125,27 +126,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut width = 800u32;
     let mut height = 600u32;
 
-    event_loop.run(move |event, _elwt, control_flow| {
+    let _ = event_loop.run(move |event, elwt| {
+	// compiler does not know the order of events. and this allow does not help. Sigh.
+        #[allow(unused_assignments)]
+	let mut modifiers = Modifiers::default();
 
-        *control_flow = ControlFlow::Wait;
+
 
         match event {
             Event::WindowEvent { event, .. } => match event {
-                WindowEvent::KeyboardInput { input, .. } => {
-		    if let Some(keycode) = input.virtual_keycode {
-                        if input.state == ElementState::Pressed && keycode == VirtualKeyCode::Q {
-                            // You can also check modifiers if needed
-                            // if modifiers.ctrl()  { ... }
-                            *control_flow = ControlFlow::Exit;
-                        }
+                WindowEvent::KeyboardInput { event, .. }  => {
+                    if event.state == ElementState::Pressed
+			&& event.logical_key == Key::Character("q".into())
+			&& modifiers.state().control_key()
+                    {
+                        elwt.exit();
                     }
                 }
-		WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                _ => {}
+                WindowEvent::ModifiersChanged(new_mods) => {
+                    modifiers = new_mods.clone();	// Clone the reference
+                }
+		WindowEvent::CloseRequested => elwt.exit(),
+                _ => {}		// empty block returns unit ()
             },
             _ => {}
         }		// END match event
-    }).unwrap();	// END event_loop.run
-    OK(())
+    });			// END event_loop.run
+    Ok(())
 }
 
