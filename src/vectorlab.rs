@@ -13,6 +13,8 @@
  * References:
  * - https://docs.rs/winit/0.29.12/winit/event/struct.KeyEvent.html
  *
+ * TODO:
+ * - check out more leniant svg parsers instead of usvg: svg, lyon_svg, or even nanosvg.
  */
 use glutin::config::{ConfigTemplate};
 use glutin::context::{ContextApi, ContextAttributesBuilder};
@@ -105,9 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     	// Single r#"..."# fails because SVG has many " quotes
     	// Triple r###"..."### ensures the closing ### is unambiguous
 
+	// usvg recommends to omit the <?xml ...?> node. If used, it must start at offset 0. Why is usvg so strict?
         let svg_content = r###"
-<?xml version="1.0" encoding="UTF-8"?>
-<svg width="400" height="300" xmlns="http://www.w3.org/2000/SVG">
+<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
   <rect width="100%" height="100%" fill="#f0f0f0"/>
   <circle cx="200" cy="150" r="80" fill="#3498db"/>
   <text x="200" y="160" font-size="24" text-anchor="middle" fill="white">SVG Test</text>
