@@ -1,107 +1,192 @@
-use std::env;
-use std::path::PathBuf;
-use winit::{
-    dpi::LogicalSize,
-    event::*,
-    event_loop::{ControlFlow, EventLoop},
-    window::{WindowBuilder},
-};
-use femtovg::{renderer::OpenGl, Canvas, Color, Path, Paint, Transform2D};
-use glutin::{ContextBuilder, event::{Event, WindowEvent}, event_loop::ControlFlow};
-use rfd::FileDialog;
+/*
+ * Perplexity prompt:
+ * write a complete rust program that
+ * uses latest glutin and winit api,
+ * loads an SVG file and allows scrolling panning zooming.
+ * CTRL-Q quits the program
+ *
+ * Requires:
+ * - cargo add resvg
+ * - cargo add raw_window_handle
+ */
 
+use glutin::config::{ConfigSurfaceTypes, ConfigTemplateBuilder};
+use glutin::context::{ContextApi, ContextAttributesBuilder};
+use glutin::display::{DisplayApiPreference};
+use glutin::prelude::*;
+use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
+
+use winit::dpi::LogicalSize;
+// use winit::event::{ElementState, Event, KeyboardInput, MouseButton, MouseScrollDelta, VirtualKeyCode, WindowEvent};
+use winit::event::{Event, WindowEvent, ElementState, MouseButton, MouseScrollDelta};
+use winit::event_loop::{EventLoop, ControlFlow};
+use winit::window::WindowBuilder;
+
+use resvg::usvg::{Options, Tree};
+use resvg::tiny_skia::{Pixmap, Transform};
+use std::num::NonZeroU32;
+use std::path::Path;
 
 fn main() {
-    // Accept initial SVG file if provided
-    let svg_file = env::args().nth(1).map(|s| PathBuf::from(s));
-    let mut current_svg = svg_file;
-
-    let event_loop = glutin::event_loop::EventLoop::new();
-    let window_builder = glutin::window::WindowBuilder::new()
-        .with_title("VectorLab")
-        .with_inner_size(glutin::dpi::LogicalSize::new(1200.0, 800.0));
-    let windowed_context = ContextBuilder::new()
-        .build_windowed(window_builder, &event_loop)
+    let event_loop = EventLoop::new().unwrap();
+    let window = WindowBuilder::new()
+        .with_title("SVG Viewer")
+        .with_inner_size(LogicalSize::new(800.0, 600.0))
+        .build(&event_loop)
         .unwrap();
-    let windowed_context = unsafe { windowed_context.make_current().unwrap() };
-    let gl = unsafe { glow::Context::from_loader_function(|s| windowed_context.get_proc_address(s)) };
-    let renderer = OpenGl::new(gl).unwrap();
-    let mut canvas = Canvas::new(renderer).unwrap();
-    canvas.set_size(800, 600, 1.0);
 
-    // Load and parse SVG file into femtovg paths and paints
-    let svg_drawables = load_svg_as_paths_and_paints(&svg_file);
+    // Correct glutin 0.32.3 API usage
+    let gl_display = unsafe {
+        glutin::display::Display::new(
+            window.raw_display_handle(),
+            DisplayApiPreference::Egl,
+        ).unwrap()
+    };
 
-    // Pan, zoom, and mouse state
-    let mut transform = Transform2D::identity();
-    // TODO: maintain a stack or matrix for pan/zoom state
+    let config_template = ConfigTemplateBuilder::new()
+        .with_alpha_size(8)
+        .with_config_surface_types(&[ConfigSurfaceTypes::Window])
+        .build();
+
+    let config = gl_display
+        .find_configs(config_template)
+        .unwrap()
+        .reduce(glutin::config::ConfigSurfaceTypes::best_type)
+        .unwrap();
+
+    let context_attributes = ContextAttributesBuilder::new()
+        .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(3, 3))))
+        .build(Some(window.raw_display_handle()));
+
+    let mut gl_context = unsafe {
+        gl_display.create_context(&config, &context_attributes).unwrap()
+    };
+
+    let surface_attrs = SurfaceAttributesBuilder::<WindowSurface>::new()
+        .build(
+            window.raw_window_handle(),
+            NonZeroU32::new(window.inner_size().width).unwrap(),
+            NonZeroU32::new(window.inner_size().height).unwrap(),
+        );
+
+    let surface = unsafe { gl_display.create_window_surface(&config, &surface_attrs).unwrap() };
+    gl_context.make_current(&surface).unwrap();
+
+    // Load SVG - FIXED STRING SYNTAX
+    // Load SVG (create a test.svg file or change path)
+    let svg_path = std::path::Path::new("test.svg");
+    let opt = Options::default();
+    let rtree = if svg_path.exists() {
+        Tree::from_file(svg_path, &opt.to_ref()).expect("Failed to load SVG")
+    } else {
+        // Create a simple test SVG if none exists
+        // Create test SVG with proper raw string syntax
+	// Used r###"..."### (triple hash delimiters) for the raw string literal. This tells Rust:
+	// r = raw string (no escaping needed)
+	// ### = delimiter that safely contains all the " characters inside without confusion
+    	// Single r#"..."# fails because SVG has many " quotes
+    	// Triple r###"..."### ensures the closing ### is unambiguous
+
+        let svg_content = r###"
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="400" height="300" xmlns="http://www.w3.org/2000/SVG">
+  <rect width="100%" height="100%" fill="#f0f0f0"/>
+  <circle cx="200" cy="150" r="80" fill="#3498db"/>
+  <text x="200" y="160" font-size="24" text-anchor="middle" fill="white">SVG Test</text>
+</svg>
+"###;
+        std::fs::write("test.svg", svg_content).unwrap();
+        Tree::from_file("test.svg", &opt.to_ref()).unwrap()
+    };
+
+    // Variables for pan, zoom
+    // View state
+    let mut zoom: f32 = 1.0;
+    let mut pan = (0.0f32, 0.0f32);
+    let mut last_cursor_pos: Option<(f64, f64)> = None;
+    let mut dragging = false;
+    let mut width = 800u32;
+    let mut height = 600u32;
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
+        *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::RedrawRequested(_) => {
-                canvas.clear_rect(0, 0, 1200, 800, Color::rgbf(1.0, 1.0, 1.0));
-                canvas.save();
-                canvas.transform(transform);
-                for (path, paint) in &svg_drawables {
-                    // To detect hover, check mouse position vs. path hit-test here
-                    canvas.fill_path(path, paint);
-                }
-                canvas.restore();
-
-                // Draw UI: menu, zoom buttons (+, -, 100%), right pane checkboxes
-                draw_ui_overlays(&mut canvas);
-
-                canvas.flush();
-                windowed_context.swap_buffers().unwrap();
-            }
             Event::WindowEvent { event, .. } => match event {
-                /* ... mouse + keyboard ... */
                 WindowEvent::KeyboardInput { input, .. } => {
-                    // Handle zoom with +/-, reset with '0', menu shortcuts
-                    // Example: Ctrl-O triggers File > Open (can hook to menu, too)
-                    if let Some(virtual_keycode) = input.virtual_keycode {
-                        if input.state == ElementState::Pressed
-                            && virtual_keycode == VirtualKeyCode::O
-                            && input.modifiers.ctrl()
-                        {
-                            if let Some(path) = FileDialog::new().add_filter("SVG", &["svg"]).pick_file() {
-                                current_svg = Some(path);
-                                // Load and parse new SVG here!
-                            }
+		    if let Some(keycode) = input.virtual_keycode {
+                        if input.state == ElementState::Pressed && keycode == VirtualKeyCode::Q {
+                            // You can also check modifiers if needed
+                            // if modifiers.ctrl()  { ... }
+                            *control_flow = ControlFlow::Exit;
                         }
                     }
                 }
-                WindowEvent::MouseInput {button, state, .. } => {
-                    // Handle panning with shift + drag logic
+		WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f32,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.1,
+                    };
+                    zoom *= 1.0 + scroll * 0.1;
+                    zoom = zoom.clamp(0.1, 10.0);
+                    window.request_redraw();
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    // Track for hover on paths
+                    if dragging {
+                        if let Some((lx, ly)) = last_cursor_pos {
+                            pan.0 += (position.x - lx) as f32;
+                            pan.1 += (position.y - ly) as f32;
+                        }
+                        last_cursor_pos = Some((position.x, position.y));
+                        window.request_redraw();
+                    }
                 }
-                WindowEvent::MouseWheel {delta, .. } => {
-                    // Apply zoom logic
+                WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
+                    match state {
+                        ElementState::Pressed => {
+                            dragging = true;
+                            last_cursor_pos = None;
+                        }
+                        ElementState::Released => {
+                            dragging = false;
+                        }
+                    }
                 }
-                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::Resized(size) => {
+                    width = size.width;
+                    height = size.height;
+                    surface.resize(
+                        &gl_context,
+                        NonZeroU32::new(width).unwrap(),
+                        NonZeroU32::new(height).unwrap(),
+                    );
+                    window.request_redraw();
+                }
+                _ => {}
+            },
+            Event::RedrawRequested(_) => {
+                // Render SVG to pixmap
+                let mut pixmap = Pixmap::new(width, height).unwrap();
+                let transform = Transform::from_scale(zoom, zoom)
+                    .post_translate(pan.0, pan.1);
+                rtree.render(transform, &mut pixmap.as_mut());
+
+                // Simple buffer swap (add GL texture rendering for pixmap display)
+                surface.swap_buffers(&gl_context).unwrap();	// High level API, safe interface.
+                // Here you should upload pixmap data to GL texture and draw (not implemented fully here)
+                // For simplicity, we just swap buffers
+                // Clear and swap (simple GL usage - you'd upload pixmap as texture here)
+		// low level API (not recommended)
+		//                unsafe {
+		//                    gl_context.swap_buffers(&surface).unwrap();
+		//                }
             }
-            Event::MainEventsCleared => {
-                windowed_context.window().request_redraw();
+            Event::AboutToWait => {
+                window.request_redraw();
             }
-            _ => (),
-        }
-    });
-}
-
-
-fn load_svg_as_paths_and_paints(svg_file: &PathBuf) -> Vec<(Path, Paint)> {
-    // Use resvg, usvg, or similar, or a custom parser
-    // Each SVG <path> becomes a femtovg::Path and corresponding Paint
-    vec![]
-}
-
-fn draw_ui_overlays(canvas: &mut Canvas<OpenGl>) {
-    // Draw menu bar rectangles/text, e.g., File (Load, Save, Quit), Help, About
-    // Draw zoom control (+/-/100% buttons)
-    // Draw right pane checkboxes (future: add interactivity)
+            _ => {}
+        }		// END match event
+    }).unwrap();	// END event_loop.run
 }
 

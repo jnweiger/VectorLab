@@ -19,6 +19,9 @@ path = "src/vectorlab.rs"	# implements:	cargo run --bin vectorlab
 # femtovg = { git = "https://github.com/femtovg/femtovg.git", branch = "main" }
 femtovg = "0.14.0"				# from crates.io
 glutin = "0.32.3"
+raw-window-handle = "0.6.2"
+resvg = "0.45.1"
+# resvg = "0.37"
 rfd = "0.10"  # add any other crates you need (example: rfd for file dialogs)
-winit = "0.28"  # for window management and event loop
-
+winit = "0.29"  # for window management and event loop
+tiny-skia = "0.11"
