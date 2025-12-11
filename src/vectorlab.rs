@@ -1,329 +1,268 @@
-/*
- * Perplexity prompt:
- * write a complete rust program that
- * uses latest glutin and winit api,
- * loads an SVG file and allows scrolling panning zooming.
- * CTRL-Q quits the program
- *
- * Requires:
- * - cargo add resvg			# resvg is the rendering library that takes the usvg::Tree and rasterizes it
- * - cargo add usvg			# usvg usvg is the SVG parsing and tree management library
- * - cargo add raw_window_handle
- *
- * References:
- * - https://docs.rs/winit/0.29.12/winit/event/struct.KeyEvent.html
- *
- * TODO:
- * - check out more leniant svg parsers instead of usvg: svg, lyon_svg, or even nanosvg.
- */
-use glutin::config::{ConfigTemplate};
-use glutin::context::{ContextApi, ContextAttributesBuilder};
-use glutin::display::{DisplayApiPreference};
-use glutin::prelude::*;
-use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
-
-use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent, ElementState, MouseButton, MouseScrollDelta};
-use winit::event_loop::{EventLoop, ControlFlow};
-use winit::window::WindowBuilder;
-use winit::keyboard::Key;
-use winit::event::Modifiers;
-
-
-
-// This resolves the E0599 error because raw_display_handle() is provided by the
-// trait, which must be explicitly imported for the method to be visible on
-// Window.
-//
-// Alternatively, upgrade to a recent winit version (e.g., 0.30+) and replace
-// window.raw_display_handle() with window.display_handle(), as suggested by the
-// compiler hint—this uses the newer API directly without needing the trait
-// import. Note that glutin 0.32.3 pairs best with older winit like 0.29
-use winit::raw_window_handle::HasRawDisplayHandle;
-use winit::raw_window_handle::HasRawWindowHandle;
-
-
-use resvg::usvg::{Options};
-use resvg::tiny_skia::{Pixmap, Transform};
-
-use usvg::Tree;
-
-use std::num::NonZeroU32;
-use std::path::Path;
 use std::fs;
+use winit::{
+    application::ApplicationHandler,
+    dpi::LogicalSize,
+    event::{Event, WindowEvent, StartCause},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key, NamedKey},
+    window::{Window, WindowAttributes},
+};
+use glutin_winit::DisplayBuilder;
+use glutin::{
+    config::ConfigSurfaceTypes, context::ContextAttributesBuilder,
+    display::GetGlDisplay,
+    prelude::*,
+    surface::{Surface, WindowSurface, SurfaceAttributesBuilder},
+};
+use glow::HasContext;
+use egui_winit::State as EguiWinitState;
+use egui::{ClippedPrimitive, Context as EguiContext, TexturesDelta};
+use egui_glow::Painter;
+use resvg::tiny_skia::PathBuilder;
+use resvg::usvg::{self, TreeParsing};
 
-struct GlState {
-    // gl_display: glutin::display::Display,
-    // config: glutin::config::Config,
-    pub gl: glow::Context,
-    pub surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
-    pub gl_context: glutin::context::PossiblyCurrentContext,
+struct VectorLabApp {
+    egui_ctx: EguiContext,
+    egui_winit: EguiWinitState,
+    painter: Painter,
+    paint_jobs: Vec<ClippedPrimitive>,
+    textures: TexturesDelta,
+    window_size: (usize, usize),
+    gl: glow::Context,
+    surface: Surface<WindowSurface>,
+    gl_context: glutin::context::PossiblyCurrentContext<glutin_winit::Api>,
+    window: Window,
+    paths: Vec<Vec<[f32; 2]>>,
+    scale: f32,
+    offset: [f32; 2],
+    file_dialog_open: bool,
+    current_file: Option<String>,
 }
 
-pub fn init_gl(
-    event_loop: &winit::event_loop::EventLoopWindowTarget<()>,
-    window: &winit::window::Window,
-) -> GlState {
-    use glutin::prelude::*;
+impl VectorLabApp {
+    fn new(window: &Window, gl_display: &glutin::display::Display<glutin_winit::Api>) -> Result<Self, Box<dyn std::error::Error>> {
+        let gl_config = gl_display
+            .find_configs(ConfigSurfaceTypes::default())
+            .expect("No GL config")
+            .next()
+            .ok_or("No suitable GL config")?;
 
-    // Create GL config
-    let display_builder = glutin_winit::DisplayBuilder::new()
-        .with_window(Some(window.clone()));
+        let surface_attrs = SurfaceAttributesBuilder::new()
+            .build(window.raw_window_handle(), None)?;
 
-    let template = glutin::config::ConfigTemplateBuilder::new()
-        .with_alpha_size(8)
-        .with_depth_size(24)
-        .with_stencil_size(8)
-        .build();
+        let surface = unsafe {
+            gl_display.create_window_surface(&gl_config, &surface_attrs)?
+        };
 
-    let (window, gl_config) = display_builder
-        .build(event_loop, template, |configs| configs[0].clone())
-        .unwrap();
+        let context_attrs = ContextAttributesBuilder::new().build(Some(window.raw_window_handle()))?;
+        let gl_context = unsafe {
+            gl_display.create_context(&gl_config, &context_attrs)?
+                .make_current(&surface)?
+        };
 
-    let gl_display = gl_config.display();
+        let gl = unsafe { glow::Context::from_loader_function(|s| gl_context.get_proc_address(s) as *const _) };
 
-    // Create context
-    let context_attributes = glutin::context::ContextAttributesBuilder::new()
-        .with_context_api(glutin::context::ContextApi::OpenGl(
-            glutin::context::Version::new(3, 3),
-        ))
-        .build(Some(window.raw_window_handle()));
+        let egui_ctx = EguiContext::default();
+        let mut egui_winit = EguiWinitState::new(&egui_ctx, window, None);
+        let painter = Painter::new(&mut gl, None);
 
-    let not_current_gl_context = unsafe {
-        gl_display
-            .create_context(&gl_config, &context_attributes)
-            .unwrap()
-    };
-
-    // Create window surface
-    let attrs = glutin::surface::SurfaceAttributesBuilder::<
-        glutin::surface::WindowSurface,
-    >::new()
-    .build(
-        window.raw_window_handle(),
-        gl_config
-            .surface_type()
-            .unwrap()
-            .bits(),
-        window.inner_size().width,
-        window.inner_size().height,
-    );
-
-    let surface = unsafe {
-        gl_display
-            .create_window_surface(&gl_config, &attrs)
-            .unwrap()
-    };
-
-    // Make context current
-    let gl_context = not_current_gl_context.make_current(&surface).unwrap();
-
-    // Load glow using the GL function loader
-    let gl = unsafe {
-        glow::Context::from_loader_function(|s| {
-            gl_display.get_proc_address(s) as *const _
+        Ok(Self {
+            egui_ctx,
+            egui_winit,
+            painter,
+            paint_jobs: vec![],
+            textures: Default::default(),
+            window_size: (1200, 800),
+            gl,
+            surface,
+            gl_context,
+            window: window.clone(),
+            paths: vec![],
+            scale: 1.0,
+            offset: [0.0, 0.0],
+            file_dialog_open: false,
+            current_file: None,
         })
-    };
-
-    // You can enable GL features here
-    unsafe {
-        gl.enable(glow::BLEND);
-        gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
     }
 
-    GlState {
-        gl,
-        surface,
-        gl_context,
+    fn load_svg(&mut self, path: &str) {
+        match fs::read_to_string(path) {
+            Ok(svg_string) => {
+                let opts = usvg::Options::default();
+                if let Ok(tree) = usvg::Tree::from_str(&svg_string, &opts) {
+                    self.paths.clear();
+                    let svg_size = tree.size().to_int_size();
+
+                    for node in tree.root().descendants() {
+                        if let usvg::NodeKind::Path(path_node) = node.borrow() {
+                            let mut path_builder = PathBuilder::new();
+                            for segment in &path_node.data.segments {
+                                match &segment {
+                                    &usvg::path::PathSegment::MoveTo { x, y } =>
+                                        path_builder.move_to(x as f32, y as f32),
+                                    &usvg::path::PathSegment::LineTo { x, y } =>
+                                        path_builder.line_to(x as f32, y as f32),
+                                    usvg::path::PathSegment::CurveTo { x1, y1, x2, y2, x, y } =>
+                                        path_builder.cubic_to(x1 as f32, y1 as f32, x2 as f32, y2 as f32, x as f32, y as f32),
+                                    _ => {}
+                                }
+                            }
+
+                            if let Some(tsvg_path) = path_builder.finish() {
+                                let mut points = vec![];
+                                for point in tsvg_path.iter() {
+                                    points.push([point.x as f32, point.y as f32]);
+                                }
+                                if !points.is_empty() {
+                                    self.paths.push(points);
+                                }
+                            }
+                        }
+                    }
+
+                    self.scale = 400.0 / svg_size.width().max(1.0) as f32;
+                    self.offset = [600.0, 400.0];
+                    self.current_file = Some(path.to_string());
+                }
+            }
+            Err(e) => eprintln!("Failed to load SVG {}: {}", path, e),
+        }
+    }
+
+    fn render(&mut self) -> Result<(), winit::error::EventLoopError> {
+        unsafe {
+            self.gl.clear_color(0.1, 0.1, 0.1, 1.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+
+        let raw_input = self.egui_winit.take_egui_input(self.window_size);
+        let output = self.egui_ctx.run(raw_input, |egui_ctx| {
+            egui::TopBottomPanel::top("menu_bar").show(egui_ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("📁 Open").clicked() {
+                        self.file_dialog_open = true;
+                    }
+                    ui.separator();
+                    ui.label(self.current_file.as_deref().unwrap_or("No file"));
+                });
+            });
+
+            egui::CentralPanel::default().show(egui_ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(20));
+
+                if self.file_dialog_open {
+                    ui.centered_and_justified(|ui| {
+                        ui.heading("Load SVG file");
+                        if ui.button("Load /home/jw/test.svg").clicked() {
+                            self.load_svg("/home/jw/test.svg");
+                            self.file_dialog_open = false;
+                        }
+                    });
+                } else if !self.paths.is_empty() {
+                    ui.heading(format!("{} paths loaded", self.paths.len()));
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.painter().rect(rect, 0.0, egui::Color32::BLACK, egui::Stroke::new(1.0, egui::Color32::WHITE));
+
+                        for path in &self.paths {
+                            let points: Vec<egui::Pos2> = path.iter()
+                                .map(|p| egui::Pos2::new(
+                                    rect.left() + (p[0] * self.scale + self.offset[0]) * rect.width() / 1200.0,
+                                    rect.top() + (p[1] * self.scale + self.offset[1]) * rect.height() / 800.0,
+                                ))
+                                .collect();
+                            if points.len() > 1 {
+                                ui.painter().add(egui::Shape::line(points.iter().cloned().collect::<Vec<_>>(), egui::Stroke::new(2.0, egui::Color32::GREEN)));
+                            }
+                        }
+                    });
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.heading("VectorLab");
+                        ui.label("Press 📁 Open or 'O' to load SVG");
+                    });
+                }
+            });
+        });
+
+        self.textures.append(output.textures_delta);
+        self.egui_winit.handle_platform_output(&self.window, output.platform_output);
+        self.paint_jobs = self.egui_ctx.tessellate(output.shapes, egui_ctx.tessellation_config());
+
+        self.painter.paint_and_update_textures(
+            &[self.window_size.0 as f32, self.window_size.1 as f32],
+            &mut self.gl,
+            &mut self.textures,
+            &self.paint_jobs,
+            &self.egui_ctx.tessellation_config(),
+        )?;
+
+        self.surface.swap_buffers(&self.gl_context)?;
+
+        Ok(())
     }
 }
 
-
-fn _init_gl_old(window: &winit::window::Window) -> GlState {
-    // --- All your OpenGL / Glutin initialization goes here ---
-
-    // Correct glutin 0.32.3 API usage
-    let gl_display = unsafe {
-        glutin::display::Display::new(
-            window.raw_display_handle().expect("Failed to get raw display handle"),
-            glutin::display::DisplayApiPreference::Egl,
-        ).unwrap()
-    };
-
-    let config_template = glutin::config::ConfigTemplate::default();
-    let mut configs = unsafe { gl_display.find_configs(config_template) };
-    let config = configs.next().unwrap_or_else(|| panic!("no config found"));	// next() requires a mutable.
-
-    let ctx_attr = glutin::context::ContextAttributesBuilder::new()
-        .with_context_api(glutin::context::ContextApi::OpenGl(
-            Some(glutin::context::Version::new(3, 3)),
-        ))
-	.build(Some(window.raw_window_handle().expect("raw window handle")));
-
-    let mut gl_context = unsafe { gl_display.create_context(&config, &ctx_attr).unwrap() };
-
-    let size = window.inner_size();
-    let surf_attr = glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
-        .build(
-            window.raw_window_handle().expect("raw window handle sa"),
-            std::num::NonZeroU32::new(size.width).unwrap(),
-            std::num::NonZeroU32::new(size.height).unwrap(),
-        );
-
-    let surface = unsafe {
-        gl_display.create_window_surface(&config, &surf_attr).unwrap()
-    };
-
-    let gl_context = gl_context.make_current(&surface).unwrap();
-
-    GlState {
-        gl_display,
-        gl_context,
-        surface,
-        config,
+impl ApplicationHandler for VectorLabApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.window.request_redraw();
     }
-}
 
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // complex signature above to allow using the ? operator.
-    let event_loop = EventLoop::new().unwrap();
-
-    let event_loop = EventLoop::new()?;
-    let window = WindowBuilder::new()
-        .with_title("SVG Viewer")
-        .build(&event_loop)
-        .unwrap();
-
-    let mut gl_state = Some(init_gl(&event_loop, &window));
-
-    // let mut window: Option<Window> = None;
-    // let mut gl_state: Option<GlState> = None;
-
-    // Load SVG - FIXED STRING SYNTAX
-    // Load SVG (create a test.svg file or change path)
-    let svg_path = std::path::Path::new("test.svg");
-    let opt = Options::default();
-    let rtree = if svg_path.exists() {
-        Tree::from_data(&fs::read(svg_path)?, &opt).expect("Failed to load SVG")
-    } else {
-        // Create a simple test SVG if none exists
-        // Create test SVG with proper raw string syntax
-	// Used r###"..."### (triple hash delimiters) for the raw string literal. This tells Rust:
-	// r = raw string (no escaping needed)
-	// ### = delimiter that safely contains all the " characters inside without confusion
-    	// Single r#"..."# fails because SVG has many " quotes
-    	// Triple r###"..."### ensures the closing ### is unambiguous
-
-	// usvg recommends to omit the <?xml ...?> node. If used, it must start at offset 0. Why is usvg so strict?
-        let svg_content = r###"
-<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
-  <rect width="100%" height="100%" fill="#f0f0f0"/>
-  <circle cx="200" cy="150" r="80" fill="#3498db"/>
-  <text x="200" y="160" font-size="24" text-anchor="middle" fill="white">SVG Test</text>
-</svg>
-"###;
-        std::fs::write("test.svg", svg_content).unwrap();
-        Tree::from_data(&fs::read("test.svg")?, &opt).expect("Failed to load dummy test.svg file")
-    };
-
-    // Variables for pan, zoom
-    // View state
-    let mut zoom: f32 = 1.0;
-    let mut pan = (0.0f32, 0.0f32);
-    let mut last_cursor_pos: Option<(f64, f64)> = None;
-    let mut dragging = false;
-    let mut width = 800u32;
-    let mut height = 600u32;
-
-    let _ = event_loop.run(move |event, elwt| {
-	// REQUIRED: tell winit the event loop continues
-	elwt.set_control_flow(ControlFlow::Wait);	// needed by winit 0.29
-
-	// compiler does not know the order of events. and this allow does not help. Sigh.
-        #[allow(unused_assignments)]
-	let mut modifiers = Modifiers::default();
-
-	// On Wayland and macOS, OpenGL contexts must be created after Event::Resumed, not before
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: winit::window::WindowId, event: WindowEvent) {
+        self.egui_winit.on_window_event(&self.egui_ctx, &event);
+        if self.egui_winit.egui_ctx().wants_pointer_input() || self.egui_winit.egui_ctx().wants_keyboard_input() {
+            return;
+        }
 
         match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::KeyboardInput { event, .. }  => {
-                    if event.state == ElementState::Pressed
-			&& event.logical_key == Key::Character("q".into())
-			&& modifiers.state().control_key()
-                    {
-                        elwt.exit();
-                    }
-                }
-                WindowEvent::ModifiersChanged(new_mods) => {
-                    modifiers = new_mods.clone();	// Clone the reference
-                }
-		WindowEvent::CloseRequested => elwt.exit(),
-	        WindowEvent::RedrawRequested(..) => {
-                    if let Some(gls) = &gl_state {
-                        unsafe {
-			    gls.gl.clear_color(0.2, 0.3, 0.3, 1.0);
-			    gls.gl.clear(glow::COLOR_BUFFER_BIT);
-                            // gl::ClearColor(0.2, 0.3, 0.3, 1.0);
-                            // gl::Clear(gl::COLOR_BUFFER_BIT);
+            WindowEvent::Resized(size) => {
+                self.window_size = (size.width as _, size.height as _);
+                self.gl.viewport(0, 0, size.width as i32, size.height as i32);
+            }
+            WindowEvent::RedrawRequested => {
+                let _ = self.render();
+            }
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput { event: keyboard_input, .. } => {
+                if keyboard_input.state.is_pressed() && !keyboard_input.repeat {
+                    match keyboard_input.logical_key {
+                        Key::Named(NamedKey::KeyO) => {
+                            self.file_dialog_open = true;
+                            self.window.request_redraw();
                         }
-
-                        gls.surface.swap_buffers(&gls.gl_context).unwrap();
+                        Key::Named(NamedKey::Escape) => event_loop.exit(),
+                        _ => {}
                     }
                 }
-		WindowEvent::Resized(size) => {
-		    if let Some(gls) = &gl_state {
-		        gls.surface.resize(
-		            &gls.gl_context,
-		            size.width.try_into().unwrap(),
-		            size.height.try_into().unwrap(),
-		        );
-		    }
-		}
-                _ => {}		// empty block returns unit ()
             }
-            Event::Resumed => {
-                // 1. Create window now (this is required)
-                let new_window = WindowBuilder::new()
-                    .with_title("SVG Vector Lab")
-                    .with_inner_size(LogicalSize::new(800.0, 600.0))
-                    .build(&elwt)
-                    .unwrap();
-
-                // 2. Call your custom GL init function
-                let gl = init_gl(&new_window);
-
-                window = Some(new_window);
-                gl_state = Some(gl);
-            }
-/*
-            WindowEvent::RedrawRequested(_) => {
-                // Render SVG to pixmap
-                let mut pixmap = Pixmap::new(width, height).unwrap();
-                let transform = Transform::from_scale(zoom, zoom)
-                    .post_translate(pan.0, pan.1);
-                rtree.render(transform, &mut pixmap.as_mut());
-
-                // Simple buffer swap (add GL texture rendering for pixmap display)
-                surface.swap_buffers(&gl_context).unwrap();	// High level API, safe interface.
-                // Here you should upload pixmap data to GL texture and draw (not implemented fully here)
-                // For simplicity, we just swap buffers
-                // Clear and swap (simple GL usage - you'd upload pixmap as texture here)
-		// low level API (not recommended)
-		//                unsafe {
-		//                    gl_context.swap_buffers(&surface).unwrap();
-		//                }
-            }
-            Event::AboutToWait => {
-		// “keep drawing frames continuously whenever the event loop is otherwise idle.”
-		// maybe not a good idea, burns CPU?
-                window.request_redraw();
-            }
-*/
             _ => {}
-        }		// END match event
-    });			// END event_loop.run
-    Ok(())
+        }
+    }
+
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _start_cause: StartCause) {
+        self.textures.remove();
+        self.window.request_redraw();
+    }
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
+    let event_loop = EventLoop::new()?;
+
+    let window_attrs = WindowAttributes::default()
+        .with_title("VectorLab - SVG Viewer")
+        .with_inner_size(LogicalSize::new(1200.0, 800.0));
+
+    let window = event_loop.create_window(window_attrs)?;
+
+    let gl_display = glutin_winit::DisplayBuilder::new(event_loop.instance())
+        .with_window_attributes(window.window_attributes_dpi())
+        .build(&event_loop, glutin_winit::DisplayRequestTemplate::default(), |configs| configs.next().unwrap())?;
+
+    let mut app = VectorLabApp::new(&window, &gl_display.0)?;
+
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}

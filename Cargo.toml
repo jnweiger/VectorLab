@@ -6,7 +6,10 @@
 [package]
 name = "vectorlab"
 version = "0.0.1"
-edition = "2024"		# cargo edition, not my vectorlab edition
+edition = "2021"		# cargo edition: Perfect for graphics/OpenGL + SVG projects in 2025
+## Perplexity says: "For your Nuremberg-based Rust+SVG+3D printing workflow, 
+## 2021 gives maximum stability with zero migration pain."
+# edition = "2024"		# update when winit/glutin publish 2024-compatible versions
 default-run = "vectorlab"	# makes '--bin vectorlab' default for cargo run
 
 [[bin]]
@@ -17,13 +20,16 @@ path = "src/vectorlab.rs"	# implements:	cargo run --bin vectorlab
 [dependencies]
 # femtovg = { path = "../../femtovg/femtovg" }	# from local github checkout
 # femtovg = { git = "https://github.com/femtovg/femtovg.git", branch = "main" }
-femtovg = "0.14.0"				# from crates.io
-glutin = "0.32.3"
-glutin-winit = "0.5"			# compatibitily layer for using winit 0.29 with glutin 0.32.3
-raw-window-handle = "0.6.2"
-resvg = "0.45.1"
-# resvg = "0.37"
-rfd = "0.10"  # add any other crates you need (example: rfd for file dialogs)
-winit = "0.29"  # for window management and event loop, matches glutin 0.32.2
+winit = "0.30"
+glutin = "0.32"
+glutin-winit = "0.5"
+glow = "0.13"
+egui = "0.28"
+egui-winit = "0.28"
+egui_glow = "0.28"
+usvg = "0.30"
+resvg = "0.38"
 tiny-skia = "0.11"
-usvg = "0.45.1"
+env_logger = "0.11"
+futures = "0.3"
+
